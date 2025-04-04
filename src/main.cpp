@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <esp_task_wdt.h> // For watchdog timer
 
 // Pin Definitions
 const int hallPin = 4;
@@ -60,11 +61,11 @@ float readMAP() {
   int raw = total / numReadings;
   float voltage = (raw / 4095.0) * 3.3;
   float kPa = (voltage - 0.2) * (700 - 15) / (4.7 - 0.2) + 15;
-  //if (deviceConnected && client.connected()) {
-  //  char debugMsg[32];
-  //  snprintf(debugMsg, sizeof(debugMsg), "Raw ADC: %d Volt: %.2f\n", raw, voltage);
-  //  client.println(debugMsg);
-  //}
+  if (deviceConnected && client.connected()) {
+    char debugMsg[32];
+    snprintf(debugMsg, sizeof(debugMsg), "Raw ADC: %d Volt: %.2f\n", raw, voltage);
+    client.println(debugMsg);
+  }
   if (raw < 300 || kPa < 20 || kPa > 120) { // Reasonable MAP range
     return 100.0; // Default to 100 kPa if out of range
   }
@@ -80,6 +81,10 @@ int getAdvance(int rpm, float map) {
 }
 
 void setup() {
+  // Initialize watchdog timer with 5-second timeout
+  esp_task_wdt_init(5, true); // 5 seconds, panic on timeout
+  esp_task_wdt_add(NULL); // Add current task to watchdog
+
   // Step 1: Blink 1 time - Start of setup
   pinMode(2, OUTPUT);
   blinkLED(1, 200);
@@ -114,6 +119,9 @@ void setup() {
 unsigned long nextSpark = 0;
 
 void loop() {
+  // Reset watchdog timer
+  esp_task_wdt_reset();
+
   // Check temperature (ESP32 internal sensor, may need calibration)
   int temp = (int)temperatureRead(); // Returns temperature in Celsius
   if (temp > 85) { // 85°C threshold
