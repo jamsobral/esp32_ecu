@@ -37,14 +37,19 @@ void blinkLED(int count, int duration) {
   }
 }
 
-// Interrupt handler for Hall sensor (RPM calculation)
+// Interrupt handler for Hall sensor (RPM calculation) with debouncing
 void IRAM_ATTR pulseInterrupt() {
+  static unsigned long lastInterrupt = 0;
   unsigned long now = micros();
+  if (now - lastInterrupt < 1000) { // Ignore interrupts within 1ms
+    return;
+  }
+  lastInterrupt = now;
   period = now - lastPulse;
   lastPulse = now;
 }
 
-// Read MAP sensor (MPX5700AP, 0-700 kPa, 0.2-4.7V output) with averaging
+// Read MAP sensor (MPX5700AP, 0-700 kPa, 0.2-4.7V output) with averaging and sanity check
 float readMAP() {
   const int numReadings = 5;
   long total = 0;
@@ -60,8 +65,8 @@ float readMAP() {
     snprintf(debugMsg, sizeof(debugMsg), "Raw ADC: %d Volt: %.2f\n", raw, voltage);
     client.println(debugMsg);
   }
-  if (raw < 300) {
-    return 100.0; // Default to 100 kPa when sensor not connected
+  if (raw < 300 || kPa < 20 || kPa > 120) { // Reasonable MAP range
+    return 100.0; // Default to 100 kPa if out of range
   }
   return kPa;
 }
@@ -109,6 +114,18 @@ void setup() {
 unsigned long nextSpark = 0;
 
 void loop() {
+  // Check temperature (ESP32 internal sensor, may need calibration)
+  int temp = (int)temperatureRead(); // Returns temperature in Celsius
+  if (temp > 85) { // 85°C threshold
+    digitalWrite(ignitionPin, LOW); // Disable ignition
+    while (true) {
+      digitalWrite(2, HIGH);
+      delay(100);
+      digitalWrite(2, LOW);
+      delay(100); // Blink rapidly to indicate overheat
+    }
+  }
+
   // Check for client connection
   static bool lastConnectedState = false;
   if (!client.connected()) {
@@ -133,9 +150,12 @@ void loop() {
   // Read MAP sensor
   float map = readMAP();
 
-  // Update RPM from interrupt data
+  // Update RPM from interrupt data with sanity check
   if (period > 0) {
     rpm = 60000000 / period;
+    if (rpm > 7000) { // Cap RPM to prevent unrealistic values
+      rpm = 0;
+    }
   } else {
     rpm = 0;
   }
