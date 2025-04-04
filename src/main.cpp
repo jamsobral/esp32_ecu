@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <esp_task_wdt.h> // For watchdog timer
 
 // Pin Definitions
 const int hallPin = 4;
@@ -37,14 +38,19 @@ void blinkLED(int count, int duration) {
   }
 }
 
-// Interrupt handler for Hall sensor (RPM calculation)
+// Interrupt handler for Hall sensor (RPM calculation) with debouncing
 void IRAM_ATTR pulseInterrupt() {
+  static unsigned long lastInterrupt = 0;
   unsigned long now = micros();
+  if (now - lastInterrupt < 1000) { // Ignore interrupts within 1ms
+    return;
+  }
+  lastInterrupt = now;
   period = now - lastPulse;
   lastPulse = now;
 }
 
-// Read MAP sensor (MPX5700AP, 0-700 kPa, 0.2-4.7V output) with averaging
+// Read MAP sensor (MPX5700AP, 0-700 kPa, 0.2-4.7V output) with averaging and sanity check
 float readMAP() {
   const int numReadings = 5;
   long total = 0;
@@ -55,13 +61,13 @@ float readMAP() {
   int raw = total / numReadings;
   float voltage = (raw / 4095.0) * 3.3;
   float kPa = (voltage - 0.2) * (700 - 15) / (4.7 - 0.2) + 15;
-  //if (deviceConnected && client.connected()) {
-  //  char debugMsg[32];
-  //  snprintf(debugMsg, sizeof(debugMsg), "Raw ADC: %d Volt: %.2f\n", raw, voltage);
-  //  client.println(debugMsg);
-  //}
-  if (raw < 300) {
-    return 100.0; // Default to 100 kPa when sensor not connected
+  if (deviceConnected && client.connected()) {
+    char debugMsg[32];
+    snprintf(debugMsg, sizeof(debugMsg), "Raw ADC: %d Volt: %.2f\n", raw, voltage);
+    client.println(debugMsg);
+  }
+  if (raw < 300 || kPa < 20 || kPa > 120) { // Reasonable MAP range
+    return 100.0; // Default to 100 kPa if out of range
   }
   return kPa;
 }
@@ -75,6 +81,10 @@ int getAdvance(int rpm, float map) {
 }
 
 void setup() {
+  // Initialize watchdog timer with 5-second timeout
+  esp_task_wdt_init(5, true); // 5 seconds, panic on timeout
+  esp_task_wdt_add(NULL); // Add current task to watchdog
+
   // Step 1: Blink 1 time - Start of setup
   pinMode(2, OUTPUT);
   blinkLED(1, 200);
@@ -86,7 +96,7 @@ void setup() {
   // Step 2: Blink 2 times - After Wi-Fi AP setup
   blinkLED(2, 200);
 
-  // Step 3: Blink 3 times - After server start
+  // Start TCP server
   server.begin();
   blinkLED(3, 200);
 
@@ -109,11 +119,30 @@ void setup() {
 unsigned long nextSpark = 0;
 
 void loop() {
-  // Check for client connection
+  // Reset watchdog timer
+  esp_task_wdt_reset();
+
+  // Check temperature (ESP32 internal sensor, may need calibration)
+  int temp = (int)temperatureRead(); // Returns temperature in Celsius
+  if (temp > 85) { // 85°C threshold
+    digitalWrite(ignitionPin, LOW); // Disable ignition
+    while (true) {
+      digitalWrite(2, HIGH);
+      delay(100);
+      digitalWrite(2, LOW);
+      delay(100); // Blink rapidly to indicate overheat
+    }
+  }
+
+  // Check for client connection with timeout
   static bool lastConnectedState = false;
+  static unsigned long lastClientCheck = 0;
   if (!client.connected()) {
-    client = server.available(); // Listen for incoming clients
-    deviceConnected = client.connected();
+    if (millis() - lastClientCheck >= 5000) { // Check every 5 seconds
+      client = server.available();
+      deviceConnected = client.connected();
+      lastClientCheck = millis();
+    }
   } else {
     deviceConnected = true;
   }
@@ -133,9 +162,12 @@ void loop() {
   // Read MAP sensor
   float map = readMAP();
 
-  // Update RPM from interrupt data
+  // Update RPM from interrupt data with sanity check
   if (period > 0) {
     rpm = 60000000 / period;
+    if (rpm > 7000) { // Cap RPM to prevent unrealistic values
+      rpm = 0;
+    }
   } else {
     rpm = 0;
   }
@@ -164,7 +196,7 @@ void loop() {
 
     // Use char buffer to send data
     char message[64];
-    snprintf(message, sizeof(message), "Adv: %d RPM: %d MAP: %.1f HB: %s\n",
+    snprintf(message, sizeof(message), "RPM: %d MAP: %.1f Adv: %d HB: %s\n",
              rpm, map, advance, cutIgnition ? "ON" : "OFF");
     client.println(message);
 
