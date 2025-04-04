@@ -60,11 +60,11 @@ float readMAP() {
   int raw = total / numReadings;
   float voltage = (raw / 4095.0) * 3.3;
   float kPa = (voltage - 0.2) * (700 - 15) / (4.7 - 0.2) + 15;
-  if (deviceConnected && client.connected()) {
-    char debugMsg[32];
-    snprintf(debugMsg, sizeof(debugMsg), "Raw ADC: %d Volt: %.2f\n", raw, voltage);
-    client.println(debugMsg);
-  }
+  //if (deviceConnected && client.connected()) {
+  //  char debugMsg[32];
+  //  snprintf(debugMsg, sizeof(debugMsg), "Raw ADC: %d Volt: %.2f\n", raw, voltage);
+  //  client.println(debugMsg);
+  //}
   if (raw < 300 || kPa < 20 || kPa > 120) { // Reasonable MAP range
     return 100.0; // Default to 100 kPa if out of range
   }
