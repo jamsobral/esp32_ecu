@@ -2,7 +2,7 @@
 #include <WiFi.h>
 
 // Pin Definitions
-const int hallPin = 4;        // Hall sensor for RPM
+const int hallPin = 4;        // Inductive pickup (via MAX9926) for RPM
 const int mapPin = 34;        // GPIO 34 for MAP sensor ADC
 const int ignitionPin = 5;    // Ignition coil control
 const int handbrakePin = 13;  // Handbrake switch
@@ -37,11 +37,11 @@ void blinkLED(int count, int duration) {
   }
 }
 
-// Interrupt handler for Hall sensor (RPM calculation) with debouncing
+// Interrupt handler for inductive pickup (RPM calculation) with debouncing
 void IRAM_ATTR pulseInterrupt() {
   static unsigned long lastInterrupt = 0;
   unsigned long now = micros();
-  if (now - lastInterrupt < 1000) { // Debounce: ignore pulses within 1ms
+  if (now - lastInterrupt < 15000) { // Increased debounce: ignore pulses within 15ms
     return;
   }
   lastInterrupt = now;
@@ -60,7 +60,7 @@ float readMAP() {
   int raw = total / numReadings;
   float calculatedVoltage = (raw / 4095.0) * 3.3;         // ESP32 ADC: 0-4095 = 0-3.3V
   float actualVoltage = calculatedVoltage * 1.5185;       // Correction factor (0.41V / 0.27V)
-  float sensorVoltage = actualVoltage * 2.0;              // Voltage divider ratio = 0.5, so Vout = 2 * V_GPIO34
+  float sensorVoltage = actualVoltage * 2.0;              // Voltage divider ratio = 0.5
   float Vs = 5.05;                                        // Measured supply voltage
   float kPa = ((sensorVoltage / Vs) - 0.04) / 0.0012858;  // Exact transfer function
   if (raw < 300 || kPa < 20 || kPa > 120) {
@@ -94,8 +94,8 @@ void setup() {
   blinkLED(3, 200);
 
   // Pin setup
-  pinMode(hallPin, INPUT_PULLUP);
-  pinMode(mapPin, INPUT);         // ADC pin
+  pinMode(hallPin, INPUT);         // Inductive pickup via MAX9926 (no pull-up)
+  pinMode(mapPin, INPUT);          // ADC pin
   pinMode(ignitionPin, OUTPUT);
   pinMode(handbrakePin, INPUT_PULLUP);
 
@@ -103,7 +103,7 @@ void setup() {
   blinkLED(4, 200);
 
   // Attach interrupt for RPM
-  attachInterrupt(digitalPinToInterrupt(hallPin), pulseInterrupt, FALLING);
+  attachInterrupt(digitalPinToInterrupt(hallPin), pulseInterrupt, RISING);
 
   // Step 5: Blink 5 times - Setup complete
   blinkLED(5, 200);
@@ -148,14 +148,52 @@ void loop() {
   // Read MAP sensor
   float map = readMAP();
 
-  // Update RPM
+  // Update RPM with noise filtering and timeout
+  static unsigned long lastPeriod = 0;
+  static int pulseCount = 0;
+  static const int minPulses = 10; // Require at least 10 consistent pulses
+  static unsigned long lastPulseTime = 0;
+  static int rpmValues[5] = {0}; // Moving average buffer
+  static int rpmIndex = 0;
+  static int lastSigState = 0;
+  static bool sigToggling = false;
+  const unsigned long timeout = 1000000; // 1s timeout
+
+  int currentSigState = digitalRead(hallPin);
+  if (currentSigState != lastSigState) {
+    sigToggling = true;
+  }
+  lastSigState = currentSigState;
+
   if (period > 0) {
-    rpm = 60000000 / period; // Convert period (µs) to RPM
-    if (rpm > 7000) {
-      rpm = 0; // Cap unrealistic values
+    if (abs((long)period - (long)lastPeriod) < 10000) { // Relaxed period consistency check
+      pulseCount++;
+      if (pulseCount >= minPulses && sigToggling) {
+        int newRpm = 30000000 / period; // Corrected for 4-cylinder, 2 pulses per crank revolution
+        if (newRpm > 7000 || newRpm < 200) { // Cap unrealistic values
+          newRpm = 0;
+        }
+        // Moving average for smoothing
+        rpmValues[rpmIndex] = newRpm;
+        rpmIndex = (rpmIndex + 1) % 5;
+        int rpmSum = 0;
+        for (int i = 0; i < 5; i++) {
+          rpmSum += rpmValues[i];
+        }
+        rpm = rpmSum / 5;
+      }
+    } else {
+      pulseCount = 0; // Reset if period changes significantly
     }
-  } else {
-    rpm = 0;
+    lastPeriod = period;
+    lastPulseTime = micros();
+  } else if (micros() - lastPulseTime > timeout) {
+    rpm = 0; // Reset RPM if no pulses for 1s
+    pulseCount = 0;
+    for (int i = 0; i < 5; i++) {
+      rpmValues[i] = 0; // Clear moving average
+    }
+    sigToggling = false;
   }
 
   // Calculate ignition advance
@@ -180,8 +218,8 @@ void loop() {
     delay(50);
 
     char message[64];
-    snprintf(message, sizeof(message), "RPM: %d MAP: %.1f Adv: %d HB: %s\n",
-             rpm, map, advance, cutIgnition ? "ON" : "OFF");
+    snprintf(message, sizeof(message), "RPM: %d MAP: %.1f Adv: %d HB: %s P: %lu C: %d S: %d\n",
+             rpm, map, advance, cutIgnition ? "ON" : "OFF", period, pulseCount, digitalRead(hallPin));
     client.println(message);
 
     lastUpdate = millis();
