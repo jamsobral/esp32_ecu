@@ -87,8 +87,7 @@ void setup() {
   tcpServer.begin();
   // Turn LED solid on when WiFi connected
   digitalWrite(LED_PIN, HIGH);
-  Serial.printf("WiFi connected, IP: %s
-", WiFi.localIP().toString().c_str());
+  Serial.printf("WiFi connected, IP: %s", WiFi.localIP().toString().c_str());
 }
 
 void loop() {
