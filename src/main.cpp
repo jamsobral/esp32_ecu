@@ -20,14 +20,13 @@ const int MIN_RPM   = 2000;
 const int RPM_STEP  = 500;
 const int MAP_ZONES = 6;
 const int RPM_ZONES = 11;  // from 2000 to 7000 inclusive
-// MAP zones: 20,40,60,80,100,120 kPa
 int timingMap[MAP_ZONES][RPM_ZONES] = {
-  {22, 24, 26, 30, 34, 38, 42, 42, 41, 40, 38},  // MAP 20 kPa
-  {20, 22, 24, 28, 32, 36, 38, 40, 39, 38, 36},  // MAP 40 kPa
-  {18, 20, 22, 26, 30, 33, 35, 36, 36, 35, 34},  // MAP 60 kPa
-  {16, 18, 20, 23, 26, 28, 30, 31, 31, 30, 29},  // MAP 80 kPa
-  {14, 16, 18, 21, 24, 26, 27, 28, 28, 27, 26},  // MAP 100 kPa
-  {12, 14, 16, 18, 20, 22, 23, 24, 25, 25, 26}   // MAP 120 kPa
+  {22, 24, 26, 30, 34, 38, 42, 42, 41, 40, 38},
+  {20, 22, 24, 28, 32, 36, 38, 40, 39, 38, 36},
+  {18, 20, 22, 26, 30, 33, 35, 36, 36, 35, 34},
+  {16, 18, 20, 23, 26, 28, 30, 31, 31, 30, 29},
+  {14, 16, 18, 21, 24, 26, 27, 28, 28, 27, 26},
+  {12, 14, 16, 18, 20, 22, 23, 24, 25, 25, 26}
 };
 
 // ======= RPM Sensing Params & Rev‑Hang =======
@@ -36,9 +35,8 @@ volatile unsigned long pulseIntervalMicros = 0;
 volatile bool sawNewPulse                  = false;
 const uint8_t NUM_LOBES                    = 4;      // Distributor lobes
 const float   DECEL_ALPHA                  = 0.3f;   // Rev‑hang smoothing
-const float   MAX_EXPECTED_RPM             = 9000.0f; // updated ceiling
-const int     PULSES_PER_REV               = 4;
-int rpmSmoothed = 0;
+const float   MAX_EXPECTED_RPM             = 9000.0f;
+float rpmSmoothed = 0.0f;
 
 // ======= ISR =======
 void IRAM_ATTR pulseInterrupt() {
@@ -99,15 +97,15 @@ void loop() {
   if (sawNewPulse) {
     sawNewPulse = false;
     if (pulseIntervalMicros > 5000 && pulseIntervalMicros < 1000000) {
-      float rawRpm = (60000000UL / pulseIntervalMicros) / PULSES_PER_REV;
+      float rawRpm = 120000000.0f / (pulseIntervalMicros * NUM_LOBES);
       if (rawRpm > MAX_EXPECTED_RPM) rawRpm = rpmSmoothed;
       if (rawRpm >= rpmSmoothed) rpmSmoothed = rawRpm;
       else rpmSmoothed = DECEL_ALPHA * rawRpm + (1.0f - DECEL_ALPHA) * rpmSmoothed;
     } else {
-      rpmSmoothed = (rpmSmoothed * 3) / 4;
+      rpmSmoothed *= 0.75f; // slow decay
     }
   }
-  int rpm = rpmSmoothed;
+  int rpm = (int)rpmSmoothed;
 
   // Handle client connect
   if (!client || !client.connected()) {
@@ -133,7 +131,7 @@ void loop() {
   if (millis() - lastLog >= 100) {
     char msg[96];
     int hb = digitalRead(HANDBRAKE_PIN) == LOW;
-    snprintf(msg, sizeof(msg), "[%lu] RPM:%d,MAP:%.1f,ADV:%d,HB:%d", millis(), rpm, mapVal, advance, hb);
+    snprintf(msg, sizeof(msg), "RPM:%d,MAP:%.1f,ADV:%d,HB:%d|[%lu]", rpm, mapVal, advance, hb, millis());
     Serial.println(msg);
     if (client && client.connected()) client.println(msg);
     lastLog = millis();
