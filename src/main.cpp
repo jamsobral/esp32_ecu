@@ -44,13 +44,13 @@ int rpmSmoothed = 0;
 void IRAM_ATTR pulseInterrupt() {
   unsigned long now = micros();
   static unsigned long lastInterrupt = 0;
-  if (now - lastInterrupt < 15000) return; // debounce
+  if (now - lastInterrupt < 15000) return;
   if (lastPulseMicros) {
     pulseIntervalMicros = now - lastPulseMicros;
     sawNewPulse = true;
   }
   lastPulseMicros = now;
-  lastInterrupt    = now;
+  lastInterrupt = now;
 }
 
 // ======= MAP Sensor =======
@@ -81,7 +81,7 @@ void setup() {
     digitalWrite(LED_PIN, HIGH); delay(200);
     digitalWrite(LED_PIN, LOW);  delay(200);
   }
-  Serial.begin(115200);
+  Serial.begin(9600);
   pinMode(DISTRIBUTOR_PIN, INPUT);
   pinMode(MAP_SENSOR_PIN, INPUT);
   pinMode(IGNITION_COIL_PIN, OUTPUT);
@@ -128,12 +128,12 @@ void loop() {
   delayMicroseconds(1000);
   digitalWrite(IGNITION_COIL_PIN, LOW);
 
-  // Logging every 200ms
+  // Logging every 100ms
   static unsigned long lastLog = 0;
-  if (millis() - lastLog >= 200) {
-    char msg[64];
+  if (millis() - lastLog >= 100) {
+    char msg[96];
     int hb = digitalRead(HANDBRAKE_PIN) == LOW;
-    snprintf(msg, sizeof(msg), "RPM:%d,MAP:%.1f,ADV:%d,HB:%d", rpm, mapVal, advance, hb);
+    snprintf(msg, sizeof(msg), "[%lu] RPM:%d,MAP:%.1f,ADV:%d,HB:%d", millis(), rpm, mapVal, advance, hb);
     Serial.println(msg);
     if (client && client.connected()) client.println(msg);
     lastLog = millis();
