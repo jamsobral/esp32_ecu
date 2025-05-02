@@ -42,7 +42,6 @@ float rpmSmoothed = 0.0f;
 void IRAM_ATTR pulseInterrupt() {
   unsigned long now = micros();
   static unsigned long lastInterrupt = 0;
-  if (now - lastInterrupt < 15000) return;
   if (lastPulseMicros) {
     pulseIntervalMicros = now - lastPulseMicros;
     sawNewPulse = true;
@@ -94,16 +93,12 @@ void setup() {
 // ======= Main Loop =======
 void loop() {
   // RPM rev‑hang smoothing
-  if (sawNewPulse) {
+  if (sawNewPulse && pulseIntervalMicros > 0) {
     sawNewPulse = false;
-    if (pulseIntervalMicros > 5000 && pulseIntervalMicros < 1000000) {
-      float rawRpm = 120000000.0f / (pulseIntervalMicros * NUM_LOBES);
-      if (rawRpm > MAX_EXPECTED_RPM) rawRpm = rpmSmoothed;
-      if (rawRpm >= rpmSmoothed) rpmSmoothed = rawRpm;
-      else rpmSmoothed = DECEL_ALPHA * rawRpm + (1.0f - DECEL_ALPHA) * rpmSmoothed;
-    } else {
-      rpmSmoothed *= 0.75f; // slow decay
-    }
+    float rawRpm = 120000000.0f / (pulseIntervalMicros * NUM_LOBES);
+    if (rawRpm > MAX_EXPECTED_RPM) rawRpm = rpmSmoothed;
+    if (rawRpm >= rpmSmoothed) rpmSmoothed = rawRpm;
+    else rpmSmoothed = DECEL_ALPHA * rawRpm + (1.0f - DECEL_ALPHA) * rpmSmoothed;
   }
   int rpm = (int)rpmSmoothed;
 
