@@ -1,237 +1,141 @@
 #include <Arduino.h>
 #include <WiFi.h>
 
-// Pin Definitions
-const int hallPin = 4;        // Inductive pickup (via MAX9926) for RPM
-const int mapPin = 34;        // GPIO 34 for MAP sensor ADC
-const int ignitionPin = 5;    // Ignition coil control
-const int handbrakePin = 13;  // Handbrake switch
+// ======= Hardware Pins =======
+#define DISTRIBUTOR_PIN    4    // Inductive pickup input (via MAX9926)
+#define MAP_SENSOR_PIN     34   // MAP sensor ADC input
+#define IGNITION_COIL_PIN  5    // MOSFET gate for ignition coil
+#define HANDBRAKE_PIN      13   // Handbrake switch input
+#define LED_PIN            2    // On‑board status LED
 
-// Variables for RPM calculation
-volatile unsigned long lastPulse = 0;
-volatile unsigned long period = 0;
-volatile int rpm = 0;
-
-// Timing map: [MAP (kPa)][RPM] -> Ignition advance (degrees BTDC)
-int timingMap[5][12] = {
-  {20, 22, 24, 26, 28, 30, 32, 34, 35, 35, 35, 35}, // MAP 20-40 kPa
-  {18, 20, 22, 24, 26, 28, 30, 32, 33, 34, 34, 34}, // MAP 40-60 kPa
-  {15, 17, 19, 21, 23, 25, 27, 29, 31, 32, 32, 32}, // MAP 60-80 kPa
-  {12, 14, 16, 18, 20, 22, 24, 26, 28, 29, 30, 30}, // MAP 80-100 kPa
-  {10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 29, 30}  // MAP 100-120 kPa
-};
-
-// Wi-Fi settings
-const char* ssid = "ESP32_Ignition";
+// ======= WiFi & TCP Server (Soft AP) =======
+const char* apSsid     = "ESP32_Ignition";
+const char* apPassword = "e3012345678";
 WiFiServer server(80);
 WiFiClient client;
 bool deviceConnected = false;
 
-// Debug blink function
-void blinkLED(int count, int duration) {
-  for (int i = 0; i < count; i++) {
-    digitalWrite(2, HIGH);
-    delay(duration);
-    digitalWrite(2, LOW);
-    delay(duration);
-  }
-}
+// ======= Linear Ignition Map (RPM 2000‑7000, 500 RPM steps) =======
+const int MIN_RPM   = 2000;
+const int RPM_STEP  = 500;
+const int MAP_ZONES = 6;
+const int RPM_ZONES = 11;  // from 2000 to 7000 inclusive
+// MAP zones: 20,40,60,80,100,120 kPa
+int timingMap[MAP_ZONES][RPM_ZONES] = {
+  {22, 24, 26, 30, 34, 38, 42, 42, 41, 40, 38},  // MAP 20 kPa
+  {20, 22, 24, 28, 32, 36, 38, 40, 39, 38, 36},  // MAP 40 kPa
+  {18, 20, 22, 26, 30, 33, 35, 36, 36, 35, 34},  // MAP 60 kPa
+  {16, 18, 20, 23, 26, 28, 30, 31, 31, 30, 29},  // MAP 80 kPa
+  {14, 16, 18, 21, 24, 26, 27, 28, 28, 27, 26},  // MAP 100 kPa
+  {12, 14, 16, 18, 20, 22, 23, 24, 25, 25, 26}   // MAP 120 kPa
+};
 
-// Interrupt handler for inductive pickup (RPM calculation) with debouncing
+// ======= RPM Sensing Params & Rev‑Hang =======
+volatile unsigned long lastPulseMicros     = 0;
+volatile unsigned long pulseIntervalMicros = 0;
+volatile bool sawNewPulse                  = false;
+const uint8_t NUM_LOBES                    = 4;      // Distributor lobes
+const float   DECEL_ALPHA                  = 0.3f;   // Rev‑hang smoothing
+const float   MAX_EXPECTED_RPM             = 9000.0f; // updated ceiling
+const int     PULSES_PER_REV               = 4;
+int rpmSmoothed = 0;
+
+// ======= ISR =======
 void IRAM_ATTR pulseInterrupt() {
-  static unsigned long lastInterrupt = 0;
   unsigned long now = micros();
-  if (now - lastInterrupt < 15000) { // Increased debounce: ignore pulses within 15ms
-    return;
+  static unsigned long lastInterrupt = 0;
+  if (now - lastInterrupt < 15000) return; // debounce
+  if (lastPulseMicros) {
+    pulseIntervalMicros = now - lastPulseMicros;
+    sawNewPulse = true;
   }
-  lastInterrupt = now;
-  period = now - lastPulse;
-  lastPulse = now;
+  lastPulseMicros = now;
+  lastInterrupt    = now;
 }
 
-// Read MAP sensor with ADC correction and exact transfer function
+// ======= MAP Sensor =======
 float readMAP() {
-  const int numReadings = 10;
-  long total = 0;
-  for (int i = 0; i < numReadings; i++) {
-    total += analogRead(mapPin);
-    delayMicroseconds(100);
+  const int samples = 10;
+  long sum = 0;
+  for (int i = 0; i < samples; i++) {
+    sum += analogRead(MAP_SENSOR_PIN);
+    delayMicroseconds(50);
   }
-  int raw = total / numReadings;
-  float calculatedVoltage = (raw / 4095.0) * 3.3;         // ESP32 ADC: 0-4095 = 0-3.3V
-  float actualVoltage = calculatedVoltage * 1.5185;       // Correction factor (0.41V / 0.27V)
-  float sensorVoltage = actualVoltage * 2.0;              // Voltage divider ratio = 0.5
-  float Vs = 5.05;                                        // Measured supply voltage
-  float kPa = ((sensorVoltage / Vs) - 0.04) / 0.0012858;  // Exact transfer function
-  if (raw < 300 || kPa < 20 || kPa > 120) {
-    return 100.0; // Default to 100 kPa if out of range
-  }
-  return kPa;
+  float v = (sum / (float)samples) / 4095.0f * 3.3f;
+  v = v * 2.0f * 1.5185f;
+  float kPa = ((v / 5.05f) - 0.04f) / 0.0012858f;
+  return constrain(kPa, 20.0f, 120.0f);
 }
 
-// Calculate ignition advance based on RPM and MAP
-int getAdvance(int rpm, float map) {
-  int rpmIdx = constrain((rpm - 500) / 500, 0, 11);  // RPM 500-6500, steps of 500
-  int mapIdx = constrain((int)(map - 20) / 20, 0, 4); // MAP 20-120 kPa, steps of 20
-  int baseAdvance = timingMap[mapIdx][rpmIdx];
-  return constrain(baseAdvance, 5, 35);              // Limit advance to 5-35° BTDC
+// ======= Simple Linear Lookup =======
+int getAdvance(int rpm, float kPa) {
+  int rpmIdx = constrain((rpm - MIN_RPM) / RPM_STEP, 0, RPM_ZONES - 1);
+  int mapIdx = constrain((int)((kPa - 20) / 20), 0, MAP_ZONES - 1);
+  return timingMap[mapIdx][rpmIdx];
 }
 
+// ======= Setup =======
 void setup() {
-  // Step 1: Blink 1 time - Start of setup
-  pinMode(2, OUTPUT);
-  blinkLED(1, 200);
-
-  // Initialize Wi-Fi as Access Point
-  WiFi.softAP(ssid);
-  IPAddress IP = WiFi.softAPIP();
-
-  // Step 2: Blink 2 times - After Wi-Fi setup
-  blinkLED(2, 200);
-
-  // Start TCP server
+  pinMode(LED_PIN, OUTPUT);
+  for (int i = 0; i < 3; i++) {
+    digitalWrite(LED_PIN, HIGH); delay(200);
+    digitalWrite(LED_PIN, LOW);  delay(200);
+  }
+  Serial.begin(115200);
+  pinMode(DISTRIBUTOR_PIN, INPUT);
+  pinMode(MAP_SENSOR_PIN, INPUT);
+  pinMode(IGNITION_COIL_PIN, OUTPUT);
+  pinMode(HANDBRAKE_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(DISTRIBUTOR_PIN), pulseInterrupt, RISING);
+  digitalWrite(IGNITION_COIL_PIN, LOW);
+  WiFi.softAP(apSsid, apPassword);
   server.begin();
-  blinkLED(3, 200);
-
-  // Pin setup
-  pinMode(hallPin, INPUT);         // Inductive pickup via MAX9926 (no pull-up)
-  pinMode(mapPin, INPUT);          // ADC pin
-  pinMode(ignitionPin, OUTPUT);
-  pinMode(handbrakePin, INPUT_PULLUP);
-
-  // Step 4: Blink 4 times - After pin setup
-  blinkLED(4, 200);
-
-  // Attach interrupt for RPM
-  attachInterrupt(digitalPinToInterrupt(hallPin), pulseInterrupt, RISING);
-
-  // Step 5: Blink 5 times - Setup complete
-  blinkLED(5, 200);
+  digitalWrite(LED_PIN, HIGH);
 }
 
-unsigned long nextSpark = 0;
-
+// ======= Main Loop =======
 void loop() {
-  // Check ESP32 temperature (basic overheat protection)
-  int temp = (int)temperatureRead();
-  if (temp > 85) { // 85°C threshold
-    digitalWrite(ignitionPin, LOW);
-    while (true) {
-      digitalWrite(2, HIGH);
-      delay(100);
-      digitalWrite(2, LOW);
-      delay(100); // Rapid blink to indicate overheat
-    }
-  }
-
-  // Handle client connection
-  static bool lastConnectedState = false;
-  if (!client.connected()) {
-    client = server.available();
-    deviceConnected = client.connected();
-  } else {
-    deviceConnected = true;
-  }
-
-  // Connection status feedback
-  if (deviceConnected && !lastConnectedState) {
-    blinkLED(3, 50); // Blink 3 times on connect
-  } else if (!deviceConnected && lastConnectedState) {
-    blinkLED(5, 500); // Blink 5 times on disconnect
-    client.stop();
-  }
-  lastConnectedState = deviceConnected;
-
-  // Read handbrake state
-  bool cutIgnition = (digitalRead(handbrakePin) == LOW);
-
-  // Read MAP sensor
-  float map = readMAP();
-
-  // Update RPM with noise filtering and timeout
-  static unsigned long lastPeriod = 0;
-  static int pulseCount = 0;
-  static const int minPulses = 10; // Require at least 10 consistent pulses
-  static unsigned long lastPulseTime = 0;
-  static int rpmValues[5] = {0}; // Moving average buffer
-  static int rpmIndex = 0;
-  static int lastSigState = 0;
-  static bool sigToggling = false;
-  const unsigned long timeout = 1000000; // 1s timeout
-
-  int currentSigState = digitalRead(hallPin);
-  if (currentSigState != lastSigState) {
-    sigToggling = true;
-  }
-  lastSigState = currentSigState;
-
-  if (period > 0) {
-    if (abs((long)period - (long)lastPeriod) < 10000) { // Relaxed period consistency check
-      pulseCount++;
-      if (pulseCount >= minPulses && sigToggling) {
-        int newRpm = 30000000 / period; // Corrected for 4-cylinder, 2 pulses per crank revolution
-        if (newRpm > 7000 || newRpm < 200) { // Cap unrealistic values
-          newRpm = 0;
-        }
-        // Moving average for smoothing
-        rpmValues[rpmIndex] = newRpm;
-        rpmIndex = (rpmIndex + 1) % 5;
-        int rpmSum = 0;
-        for (int i = 0; i < 5; i++) {
-          rpmSum += rpmValues[i];
-        }
-        rpm = rpmSum / 5;
-      }
+  // RPM rev‑hang smoothing
+  if (sawNewPulse) {
+    sawNewPulse = false;
+    if (pulseIntervalMicros > 5000 && pulseIntervalMicros < 1000000) {
+      float rawRpm = (60000000UL / pulseIntervalMicros) / PULSES_PER_REV;
+      if (rawRpm > MAX_EXPECTED_RPM) rawRpm = rpmSmoothed;
+      if (rawRpm >= rpmSmoothed) rpmSmoothed = rawRpm;
+      else rpmSmoothed = DECEL_ALPHA * rawRpm + (1.0f - DECEL_ALPHA) * rpmSmoothed;
     } else {
-      pulseCount = 0; // Reset if period changes significantly
+      rpmSmoothed = (rpmSmoothed * 3) / 4;
     }
-    lastPeriod = period;
-    lastPulseTime = micros();
-  } else if (micros() - lastPulseTime > timeout) {
-    rpm = 0; // Reset RPM if no pulses for 1s
-    pulseCount = 0;
-    for (int i = 0; i < 5; i++) {
-      rpmValues[i] = 0; // Clear moving average
+  }
+  int rpm = rpmSmoothed;
+
+  // Handle client connect
+  if (!client || !client.connected()) {
+    WiFiClient nc = server.available();
+    if (nc) {
+      client = nc;
+      digitalWrite(LED_PIN, LOW); delay(100);
+      digitalWrite(LED_PIN, HIGH);
     }
-    sigToggling = false;
   }
 
-  // Calculate ignition advance
-  int advance = getAdvance(rpm, map);
+  // Read sensors & compute advance
+  float mapVal = readMAP();
+  int advance = getAdvance(rpm, mapVal);
 
-  // Fire ignition coil if conditions met
-  if (!cutIgnition && micros() >= nextSpark && rpm > 0) {
-    digitalWrite(ignitionPin, HIGH);
-    delayMicroseconds(1000); // 1ms dwell time
-    digitalWrite(ignitionPin, LOW);
-    unsigned long period_us = 60000000 / rpm;
-    unsigned long advanceTime = (period_us * advance) / 360;
-    nextSpark = micros() + period_us - advanceTime;
+  // Fire ignition coil: 1ms dwell
+  digitalWrite(IGNITION_COIL_PIN, HIGH);
+  delayMicroseconds(1000);
+  digitalWrite(IGNITION_COIL_PIN, LOW);
+
+  // Logging every 200ms
+  static unsigned long lastLog = 0;
+  if (millis() - lastLog >= 200) {
+    char msg[64];
+    int hb = digitalRead(HANDBRAKE_PIN) == LOW;
+    snprintf(msg, sizeof(msg), "RPM:%d,MAP:%.1f,ADV:%d,HB:%d", rpm, mapVal, advance, hb);
+    Serial.println(msg);
+    if (client && client.connected()) client.println(msg);
+    lastLog = millis();
   }
-
-  // Send data to client every 100ms
-  static unsigned long lastUpdate = 0;
-  if (deviceConnected && client.connected() && millis() - lastUpdate >= 100) {
-    digitalWrite(2, HIGH);
-    delay(50);
-    digitalWrite(2, LOW);
-    delay(50);
-
-    char message[64];
-    snprintf(message, sizeof(message), "RPM: %d MAP: %.1f Adv: %d HB: %s P: %lu C: %d S: %d\n",
-             rpm, map, advance, cutIgnition ? "ON" : "OFF", period, pulseCount, digitalRead(hallPin));
-    client.println(message);
-
-    lastUpdate = millis();
-  }
-
-  // Idle blink if no client or no update
-  if (!deviceConnected || (millis() - lastUpdate >= 100)) {
-    digitalWrite(2, HIGH);
-    delay(500);
-    digitalWrite(2, LOW);
-    delay(500);
-  }
-
-  delay(10);
 }
