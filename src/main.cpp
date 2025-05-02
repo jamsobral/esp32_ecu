@@ -95,16 +95,12 @@ void setup() {
 // ======= Main Loop =======
 void loop() {
   // RPM rev‑hang smoothing
-  if (sawNewPulse) {
+  if (sawNewPulse && pulseIntervalMicros > 0) {
     sawNewPulse = false;
-    if (pulseIntervalMicros > 5000 && pulseIntervalMicros < 1000000) {
-      float rawRpm = (60000000UL / pulseIntervalMicros) / PULSES_PER_REV;
-      if (rawRpm > MAX_EXPECTED_RPM) rawRpm = rpmSmoothed;
-      if (rawRpm >= rpmSmoothed) rpmSmoothed = rawRpm;
-      else rpmSmoothed = DECEL_ALPHA * rawRpm + (1.0f - DECEL_ALPHA) * rpmSmoothed;
-    } else {
-      rpmSmoothed = (rpmSmoothed * 3) / 4;
-    }
+    float rawRpm = 120000000.0f / (pulseIntervalMicros / PULSES_PER_REV);
+    if (rawRpm > MAX_EXPECTED_RPM) rawRpm = rpmSmoothed;
+    if (rawRpm >= rpmSmoothed) rpmSmoothed = rawRpm;
+    else rpmSmoothed = DECEL_ALPHA * rawRpm + (1.0f - DECEL_ALPHA) * rpmSmoothed;
   }
   int rpm = rpmSmoothed;
 
