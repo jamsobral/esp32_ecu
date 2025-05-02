@@ -44,8 +44,6 @@ int rpmSmoothed = 0;
 void IRAM_ATTR pulseInterrupt() {
   unsigned long now = micros();
   static unsigned long lastInterrupt = 0;
-  // Debounce: ignore any pulses closer than ~3ms to avoid false triggers
-  if (now - lastInterrupt < 3000) return; // debounce
   if (lastPulseMicros) {
     pulseIntervalMicros = now - lastPulseMicros;
     sawNewPulse = true;
