@@ -1,6 +1,6 @@
 #include <Arduino.h>
 
-#define IGNITION_COIL_PIN  4  // Adjust this if you're using another pin
+#define IGNITION_COIL_PIN  5  // Adjust this if you're using another pin
 
 void setup() {
   pinMode(IGNITION_COIL_PIN, OUTPUT);
