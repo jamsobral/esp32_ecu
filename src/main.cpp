@@ -1,18 +1,22 @@
 #include <Arduino.h>
-
-#define IGNITION_COIL_PIN  5  // Adjust this if you're using another pin
+#define IGNITION_COIL_PIN 5      // GPIO controlling the coil's ground via MOSFET
+#define DWELL_TIME_US     3000   // Dwell time: 3 ms (charging the coil)
+#define FIRE_INTERVAL_MS  2000   // Fire every 2 seconds
 
 void setup() {
+  Serial.begin(9600);
   pinMode(IGNITION_COIL_PIN, OUTPUT);
   digitalWrite(IGNITION_COIL_PIN, LOW);
+  Serial.println("Spark test started. Coil will fire every 2 seconds.");
 }
 
 void loop() {
-  // Fire the coil (2ms dwell)
+  Serial.println("Charging coil...");
   digitalWrite(IGNITION_COIL_PIN, HIGH);
-  delayMicroseconds(2000);
+  delayMicroseconds(DWELL_TIME_US);
+
+  Serial.println("Firing coil (spark)!");
   digitalWrite(IGNITION_COIL_PIN, LOW);
 
-  // Wait before next pulse
-  delay(500);  // 500ms between sparks (2 sparks/sec)
+  delay(FIRE_INTERVAL_MS);
 }
