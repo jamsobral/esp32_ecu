@@ -1,64 +1,57 @@
 #include <Arduino.h>
+#include <WiFi.h>
 
-const int CAM_PIN                = 4;      // GPIO from MAX9926 Out1
-const uint8_t NUM_LOBES          = 4;      // Number of lobes on your distributor spider
-const unsigned long UPDATE_INTERVAL_MS = 100;      // How often to refresh/print (ms)
-const float DECEL_ALPHA          = 0.3f;   // 0 = max hang, 1 = no hang
-const float MAX_EXPECTED_RPM     = 8000.0f; // ignore any rawRPM > this
+const int HALL_PIN                    = 4;      // Hall sensor input
+const uint8_t PULSES_PER_REV          = 35;     // 36-1 wheel -> 35 pulses/rev
+const unsigned long UPDATE_INTERVAL_MS = 200;   // Send RPM every 200 ms
 
-// Shared between ISR and loop
-volatile unsigned long lastPulseMicros    = 0;
-volatile unsigned long pulseIntervalMicros = 0;
-volatile bool sawNewPulse                 = false;
+const char* WIFI_SSID     = "ESP32_RPM";          // WiFi Access Point SSID
+const char* WIFI_PASSWORD = "esp32pass";          // Soft AP password
 
-void IRAM_ATTR onCamPulse() {
-  unsigned long now = micros();
-  if (lastPulseMicros != 0) {
-    pulseIntervalMicros = now - lastPulseMicros;
-    sawNewPulse = true;
-  }
-  lastPulseMicros = now;
+// Pulse counter shared between ISR and loop
+volatile unsigned long pulseCount = 0;
+
+WiFiServer server(80);
+WiFiClient client;
+
+void IRAM_ATTR onHallPulse() {
+  pulseCount++;
 }
 
 void setup() {
   Serial.begin(9600);
-  pinMode(CAM_PIN, INPUT);
-  attachInterrupt(digitalPinToInterrupt(CAM_PIN), onCamPulse, RISING);
+  pinMode(HALL_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(HALL_PIN), onHallPulse, RISING);
+
+  WiFi.softAP(WIFI_SSID, WIFI_PASSWORD);
+  server.begin();
 }
 
 void loop() {
-  static unsigned long lastPrintMs = 0;
-  static float        displayedRPM = 0.0f;
+  static unsigned long lastUpdate = 0;
 
   unsigned long nowMs = millis();
-  if (nowMs - lastPrintMs < UPDATE_INTERVAL_MS) return;
-  lastPrintMs = nowMs;
+  if (nowMs - lastUpdate < UPDATE_INTERVAL_MS) {
+    // handle new client connections
+    if (!client || !client.connected()) {
+      WiFiClient newClient = server.available();
+      if (newClient) {
+        client = newClient;
+      }
+    }
+    return;
+  }
+  lastUpdate = nowMs;
 
-  // Grab the latest interval & flag, then clear sawNewPulse
   noInterrupts();
-    unsigned long interval = pulseIntervalMicros;
-    bool havePulse         = sawNewPulse;
-    sawNewPulse           = false;
+  unsigned long pulses = pulseCount;
+  pulseCount = 0;
   interrupts();
 
-  if (havePulse && interval > 0) {
-    // 120e6 = 2 * 60 * 10^6 (cam→crank & µs→min)
-    float rawRPM = 120000000.0f / (interval * NUM_LOBES);
+  float rpm = (pulses * (60000.0f / UPDATE_INTERVAL_MS)) / PULSES_PER_REV;
 
-    // --- clamp any crazy spikes above MAX_EXPECTED_RPM ---
-    if (rawRPM > MAX_EXPECTED_RPM) {
-      rawRPM = displayedRPM;  // ignore this spike
-    }
-
-    // --- rev‑hang smoothing on decel only ---
-    if (rawRPM >= displayedRPM) {
-      displayedRPM = rawRPM;  // jump up immediately
-    } else {
-      // blend toward new value
-      displayedRPM = DECEL_ALPHA * rawRPM
-                   + (1.0f - DECEL_ALPHA) * displayedRPM;
-    }
+  Serial.printf("RPM: %.2f\n", rpm);
+  if (client && client.connected()) {
+    client.printf("%.2f\n", rpm);
   }
-
-  Serial.printf("Time: %lu ms | RPM: %.2f\n", nowMs, displayedRPM);
 }
