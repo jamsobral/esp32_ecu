@@ -1,30 +1,29 @@
 #include <Arduino.h>
 #include <WiFi.h>
 
-// Pin Definitions
+// === Pin Definitions ===
 const int hallPin = 4;
 const int mapPin = 34;
 const int ignitionPin = 5;
 const int handbrakePin = 13;
 
-// Trigger wheel setup (36-1)
+// === Trigger Wheel Setup (36-1, missing tooth 19 teeth after TDC) ===
 const int TEETH_COUNT = 36;
-const int MISSING_TOOTH_ANGLE = 190; // degrees before TDC
-const int DEGREES_PER_TOOTH = 360 / TEETH_COUNT;
-const int TDC_TOOTH = MISSING_TOOTH_ANGLE / DEGREES_PER_TOOTH;
+const int DEGREES_PER_TOOTH = 10;               // 360 / 36
+const int MISSING_TOOTH_TO_TDC_DEG = 190;       // 19 teeth × 10° each
 
-// Variables
+// === Position Tracking ===
 volatile int toothCounter = -1;
 volatile unsigned long lastToothTime = 0;
 volatile unsigned long toothInterval = 0;
 volatile bool gapDetected = false;
 
-// RPM and Ignition
+// === RPM and Ignition ===
 float rpm = 0;
-float map = 100;
+float mapValue = 100;  // Renamed from "map"
 unsigned long nextSparkMicros = 0;
 
-// Timing map [MAP (kPa)][RPM] -> Ignition advance (degrees BTDC)
+// === Timing Map: [MAP (kPa)][RPM] ===
 int timingMap[5][12] = {
   {20, 22, 24, 26, 28, 30, 32, 34, 35, 35, 35, 35},
   {18, 20, 22, 24, 26, 28, 30, 32, 33, 34, 34, 34},
@@ -33,38 +32,48 @@ int timingMap[5][12] = {
   {10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 29, 30}
 };
 
-// Wi-Fi
+// === Wi-Fi ===
 const char* WIFI_SSID = "ESP32_RPM";
 const char* WIFI_PASSWORD = "esp32pass";
 WiFiServer server(80);
 WiFiClient client;
 
-// Interrupt handler
+// === Interrupt Handler ===
 void IRAM_ATTR onHallPulse() {
   unsigned long now = micros();
   unsigned long interval = now - lastToothTime;
 
-  if (interval > toothInterval * 1.5) { // Detect missing tooth
+  // Detect missing tooth (gap): interval much larger than normal
+  if (interval > toothInterval * 1.5) {
     toothCounter = 0;
     gapDetected = true;
   } else if (toothCounter >= 0) {
     toothCounter++;
+    if (toothCounter >= (TEETH_COUNT - 1)) toothCounter = 0; // wrap around
   }
 
   toothInterval = interval;
   lastToothTime = now;
 }
 
+// === MAP Sensor Reading ===
 float readMAP() {
-  int raw = analogRead(mapPin);
+  const int numReadings = 5;
+  long total = 0;
+  for (int i = 0; i < numReadings; i++) {
+    total += analogRead(mapPin);
+    delayMicroseconds(100);
+  }
+  int raw = total / numReadings;
   float voltage = (raw / 4095.0) * 3.3;
   float kPa = (voltage - 0.2) * (700 - 15) / (4.7 - 0.2) + 15;
   return (raw < 300) ? 100.0 : kPa;
 }
 
-int getAdvance(int rpm, float map) {
-  int rpmIdx = constrain((rpm - 500) / 500, 0, 11);
-  int mapIdx = constrain((int)(map - 20) / 20, 0, 4);
+// === Advance Calculation ===
+int getAdvance(int rpmVal, float mapVal) {
+  int rpmIdx = constrain((rpmVal - 500) / 500, 0, 11);
+  int mapIdx = constrain((int)(mapVal - 20) / 20, 0, 4);
   return constrain(timingMap[mapIdx][rpmIdx], 5, 35);
 }
 
@@ -81,11 +90,13 @@ void setup() {
 }
 
 void loop() {
+  // Always handle new client connections
   if (!client || !client.connected()) {
     WiFiClient newClient = server.available();
     if (newClient) client = newClient;
   }
 
+  // Update RPM calculation every 100 ms
   static unsigned long lastRPMCalc = 0;
   unsigned long now = millis();
 
@@ -95,32 +106,34 @@ void loop() {
     interrupts();
 
     rpm = (intervalCopy > 0) ? 60000000.0 / (intervalCopy * TEETH_COUNT) : 0;
-    map = readMAP();
+    mapValue = readMAP();
 
     lastRPMCalc = now;
   }
 
   bool cutIgnition = digitalRead(handbrakePin) == LOW;
 
+  // Engine position and ignition logic
   if (gapDetected && toothCounter >= 0 && rpm > 0) {
     int crankAngle = (toothCounter * DEGREES_PER_TOOTH - MISSING_TOOTH_TO_TDC_DEG + 360) % 360;
-    int advanceAngle = getAdvance(rpm, map);
+    int advanceAngle = getAdvance(rpm, mapValue);
 
     if (!cutIgnition && crankAngle >= (360 - advanceAngle) && micros() >= nextSparkMicros) {
-        digitalWrite(ignitionPin, HIGH);
-        delayMicroseconds(1000);
-        digitalWrite(ignitionPin, LOW);
+      digitalWrite(ignitionPin, HIGH);
+      delayMicroseconds(1000);
+      digitalWrite(ignitionPin, LOW);
 
-        unsigned long revPeriod = 60000000UL / rpm;
-        nextSparkMicros = micros() + revPeriod;
+      unsigned long revPeriod = 60000000UL / rpm;
+      nextSparkMicros = micros() + revPeriod;
     }
     gapDetected = false;
   }
 
-  Serial.printf("RPM: %.1f, MAP: %.1f, Adv: %d\n", rpm, map, getAdvance(rpm, map));
+  // Debug output
+  Serial.printf("RPM: %.1f, MAP: %.1f, Adv: %d\n", rpm, mapValue, getAdvance(rpm, mapValue));
 
   if (client.connected()) {
-    client.printf("RPM: %.1f MAP: %.1f Adv: %d\n", rpm, map, getAdvance(rpm, map));
+    client.printf("RPM: %.1f MAP: %.1f Adv: %d\n", rpm, mapValue, getAdvance(rpm, mapValue));
   }
 
   delay(5);
