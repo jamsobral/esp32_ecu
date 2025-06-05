@@ -15,8 +15,13 @@ const int MISSING_TOOTH_TO_TDC_DEG = 190;       // 19 teeth × 10° each
 // === Position Tracking ===
 volatile int toothCounter = -1;
 volatile unsigned long lastToothTime = 0;
-volatile unsigned long toothInterval = 0;
+volatile unsigned long lastInterval = 0;
 volatile bool gapDetected = false;
+
+// === Tooth Interval Averaging (2 intervals) ===
+#define RPM_AVG_TEETH 2
+volatile unsigned long toothIntervals[RPM_AVG_TEETH] = {0};
+volatile int toothIntervalIdx = 0;
 
 // === RPM and Ignition ===
 float rpm = 0;
@@ -43,8 +48,12 @@ void IRAM_ATTR onHallPulse() {
   unsigned long now = micros();
   unsigned long interval = now - lastToothTime;
 
+  // Store interval for averaging
+  toothIntervals[toothIntervalIdx] = interval;
+  toothIntervalIdx = (toothIntervalIdx + 1) % RPM_AVG_TEETH;
+
   // Detect missing tooth (gap): interval much larger than normal
-  if (interval > toothInterval * 1.5) {
+  if (interval > lastInterval * 1.8) { // Raised threshold for robustness
     toothCounter = 0;
     gapDetected = true;
   } else if (toothCounter >= 0) {
@@ -52,7 +61,7 @@ void IRAM_ATTR onHallPulse() {
     if (toothCounter >= (TEETH_COUNT - 1)) toothCounter = 0; // wrap around
   }
 
-  toothInterval = interval;
+  lastInterval = interval;
   lastToothTime = now;
 }
 
@@ -75,6 +84,30 @@ int getAdvance(int rpmVal, float mapVal) {
   int rpmIdx = constrain((rpmVal - 500) / 500, 0, 11);
   int mapIdx = constrain((int)(mapVal - 20) / 20, 0, 4);
   return constrain(timingMap[mapIdx][rpmIdx], 5, 35);
+}
+
+// === RPM Calculation from Averaged Tooth Intervals ===
+float calcRPM() {
+  noInterrupts();
+  unsigned long sum = 0;
+  /**
+   * Main loop:
+   * - Handle new client connections (if any)
+   * - Update RPM calculation every 100 ms
+   * - Update MAP sensor reading
+   * - Run engine position and ignition logic:
+   *   - Calculate crankshaft angle from tooth counter
+   *   - Get advance angle from timing map
+   *   - Trigger ignition if conditions are met
+   * - Output debug information to serial monitor and client (if connected)
+   * - Sleep for 5 ms
+   */
+  for (int i = 0; i < RPM_AVG_TEETH; i++) sum += toothIntervals[i];
+  interrupts();
+
+  float avgInterval = (float)sum / RPM_AVG_TEETH;
+  if (avgInterval == 0) return 0;
+  return 60000000.0 / (avgInterval * TEETH_COUNT);
 }
 
 void setup() {
@@ -101,13 +134,8 @@ void loop() {
   unsigned long now = millis();
 
   if (now - lastRPMCalc >= 100) {
-    noInterrupts();
-    unsigned long intervalCopy = toothInterval;
-    interrupts();
-
-    rpm = (intervalCopy > 0) ? 60000000.0 / (intervalCopy * TEETH_COUNT) : 0;
+    rpm = calcRPM();
     mapValue = readMAP();
-
     lastRPMCalc = now;
   }
 
