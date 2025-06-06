@@ -1,6 +1,6 @@
 #include <Arduino.h>
 
-const int ignitionPin = 5; // Confirm this matches your hardware
+const int ignitionPin = 5;
 
 void setup() {
   Serial.begin(9600);
@@ -9,9 +9,9 @@ void setup() {
 }
 
 void loop() {
-  digitalWrite(ignitionPin, HIGH);     // Trigger ignition (start dwell)
-  Serial.println("SPARK!");            // Print for confirmation
-  delay(5);                            // Hold HIGH for 5 ms
-  digitalWrite(ignitionPin, LOW);      // End dwell (coil fires)
-  delay(495);                          // Wait before next pulse (2Hz)
+  digitalWrite(ignitionPin, LOW);   // MOSFET ON (start dwell, charge coil)
+  delay(5);                          // 5 ms dwell (safe)
+  digitalWrite(ignitionPin, HIGH);    // MOSFET OFF (coil fires)
+  Serial.println("SPARK!");
+  delay(500);                        // Wait before next pulse (500 ms)
 }
