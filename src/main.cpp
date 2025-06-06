@@ -1,44 +1,24 @@
 #include <Arduino.h>
 
-// Pin Definitions
-const int hallPin = 4;
-
-// Trigger wheel setup
-const int TEETH_COUNT = 36;
-const int TEETH_WITH_GAP = 35; // 36-1 wheel
-
-// State variables
-volatile int toothCounter = -1;
-volatile unsigned long lastToothTime = 0;
-volatile unsigned long lastToothInterval = 0;
-
-void IRAM_ATTR onHallPulse() {
-  unsigned long now = micros();
-  unsigned long interval = now - lastToothTime;
-
-  // Detect missing tooth
-  if (interval > lastToothInterval * 1.3 && lastToothInterval > 1000) { // 1.3× threshold, ignore first pulse
-    toothCounter = 0;
-    Serial.print("=== MISSING TOOTH DETECTED! ===\n");
-  } else if (toothCounter >= 0) {
-    toothCounter++;
-    if (toothCounter >= TEETH_WITH_GAP) toothCounter = 0;
-  }
-
-  lastToothInterval = interval;
-  lastToothTime = now;
-
-  // Print every tooth event
-  Serial.printf("Tooth: %2d   Interval: %6lu us\n", toothCounter, interval);
-}
+const int mapPin = 34; // ADC1_6 on ESP32, confirm your wiring
 
 void setup() {
-  Serial.begin(115200);
-  pinMode(hallPin, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(hallPin), onHallPulse, RISING);
-  Serial.println("=== Trigger Wheel Test ===");
+  Serial.begin(9600);
+  pinMode(mapPin, INPUT);
+  Serial.println("=== MAP Sensor Test ===");
 }
 
 void loop() {
-  delay(100);
+  const int numReadings = 10;
+  long total = 0;
+  for (int i = 0; i < numReadings; i++) {
+    total += analogRead(mapPin);
+    delay(5);
+  }
+  int raw = total / numReadings;
+  float voltage = (raw / 4095.0) * 3.3;
+  float kPa = (voltage - 0.2) * (700.0 - 15.0) / (4.7 - 0.2) + 15.0;
+
+  Serial.printf("Raw ADC: %4d\tVoltage: %.3f V\tMAP: %.2f kPa\n", raw, voltage, kPa);
+  delay(250);
 }
