@@ -33,7 +33,7 @@ void IRAM_ATTR onHallPulse() {
 }
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(9600);
   pinMode(hallPin, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(hallPin), onHallPulse, RISING);
   Serial.println("=== Trigger Wheel Test ===");
